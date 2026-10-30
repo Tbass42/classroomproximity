@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Classroom Proximity & Analytics Tracker</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 12px; background: #f8fafc; text-align: center; color: #0f172a; }
+    
+    .card { background: white; border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 10px; }
+    
+    .btn { background: #2563eb; color: white; border: none; padding: 8px 14px; font-size: 0.9rem; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .btn:disabled { background: #cbd5e1; cursor: not-allowed; }
+    .btn-secondary { background: #64748b; }
+    .btn-danger { background: #ef4444; }
+    .btn-success { background: #10b981; }
+    
+    select, input { padding: 8px 12px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.9rem; }
+    
+    #timer-box { font-size: 1.8rem; font-weight: bold; color: #1e293b; margin: 6px 0; }
+    #prompt-banner { background: #fef08a; color: #854d0e; padding: 10px; margin-bottom: 10px; border-radius: 8px; font-weight: bold; display: none; }
+    
+    #canvas-container { position: relative; width: 100%; max-width: 700px; margin: 0 auto; border: 2px solid #94a3b8; border-radius: 10px; background: #ffffff; touch-action: none; overflow: hidden; }
+    canvas { width: 100%; height: auto; display: block; }
+
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+    .stat-box { background: #f1f5f9; padding: 8px; border-radius: 6px; font-size: 0.85rem; }
+    .stat-val { font-size: 1.1rem; font-weight: bold; color: #2563eb; }
+  </style>
+</head>
+<body>
+
+  <h2>Classroom Proximity Tracker & Quadrant Analytics</h2>
+
+  <!-- Classroom Preset Manager -->
+  <div class="card">
+    <div class="toolbar">
+      <label for="roomSelect" style="align-self: center; font-weight: bold;">Classroom Preset:</label>
+      <select id="roomSelect" onchange="loadSelectedRoom()">
+        <option value="default">Default Room</option>
+      </select>
+      <button class="btn btn-secondary" onclick="saveCurrentRoomAsPreset()">Save Layout As...</button>
+      <button class="btn btn-danger" onclick="deleteCurrentPreset()">Delete Layout</button>
+    </div>
+    <div id="design-toolbar" class="toolbar">
+      <button class="btn btn-secondary" onclick="addFurniture('teacherDesk')">+ Teacher Desk</button>
+      <button class="btn btn-secondary" onclick="addFurniture('studentDesk')">+ Student Desk</button>
+      <button class="btn btn-secondary" onclick="addFurniture('whiteboard')">+ Whiteboard</button>
+      <button class="btn btn-success" onclick="lockLayout()">Lock & Start Session</button>
+    </div>
+  </div>
+
+  <!-- Tracker Control Panel -->
+  <div id="tracker-panel" class="card" style="display: none;">
+    <div class="toolbar">
+      <button id="start-btn" class="btn btn-success" onclick="startSession()">Start 42-Min Timer</button>
+      <button class="btn btn-secondary" onclick="unlockLayout()">Unlock Layout</button>
+      <button class="btn btn-secondary" onclick="exportHeatmapImage()">Download Heatmap PNG</button>
+      <button class="btn btn-secondary" onclick="exportCSVData()">Export CSV</button>
+      <button class="btn btn-success" onclick="sendToGoogleSheets()">Sync to Google Sheet</button>
+    </div>
+    <div id="timer-box">42:00</div>
+    <div id="prompt-banner">TAP TEACHER'S CURRENT LOCATION!</div>
+  </div>
+
+  <!-- Interactive Map Canvas -->
+  <div id="canvas-container">
+    <canvas id="roomCanvas" width="700" height="500"></canvas>
+  </div>
+
+  <!-- Real-time Quadrant Analytics -->
+  <div class="card">
+    <strong>Quadrant Proximity Distribution</strong>
+    <div class="stats-grid">
+      <div class="stat-box">Front-Left<div id="stat-fl" class="stat-val">0%</div></div>
+      <div class="stat-box">Front-Right<div id="stat-fr" class="stat-val">0%</div></div>
+      <div class="stat-box">Back-Left<div id="stat-bl" class="stat-val">0%</div></div>
+      <div class="stat-box">Back-Right<div id="stat-br" class="stat-val">0%</div></div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('roomCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let mode = 'design';
+    let furniture = [];
+    let heatPoints = [];
+    let selectedElement = null;
+    let isDragging = false, dragOffsetX = 0, dragOffsetY = 0;
+    
+    // Configurable Google Apps Script Webhook URL
+    let GOOGLE_SHEET_WEBHOOK_URL = localStorage.getItem('google_sheet_url') || ""; 
+
+    let totalSeconds = 42 * 60;
+    let timerInterval = null, sessionActive = false;
+
+    // Load saved layout presets from localStorage
+    function loadSavedPresets() {
+      const select = document.getElementById('roomSelect');
+      select.innerHTML = '<option value="default">Default Room Layout</option>';
+      const presets = JSON.parse(localStorage.getItem('classroom_presets') || '{}');
+      for (let name in presets) {
+        const opt = document.createElement('option');
+        opt.value = name; opt.innerText = name;
+        select.appendChild(opt);
+      }
+    }
+
+    function saveCurrentRoomAsPreset() {
+      const name = prompt("Enter a name for this classroom setup (e.g., 'Period 1 - Pods'):");
+      if (!name) return;
+      const presets = JSON.parse(localStorage.getItem('classroom_presets') || '{}');
+      presets[name] = furniture;
+      localStorage.setItem('classroom_presets', JSON.stringify(presets));
+      loadSavedPresets();
+      document.getElementById('roomSelect').value = name;
+    }
+
+    function loadSelectedRoom() {
+      const name = document.getElementById('roomSelect').value;
+      if (name === 'default') {
+        initDefaultRoom();
+      } else {
+        const presets = JSON.parse(localStorage.getItem('classroom_presets') || '{}');
+        furniture = presets[name] || [];
+        heatPoints = [];
+        updateAnalytics();
+        drawRoom();
+      }
+    }
+
+    function deleteCurrentPreset() {
+      const name = document.getElementById('roomSelect').value;
+      if (name === 'default') return alert("Cannot delete default layout.");
+      if (confirm(`Delete preset '${name}'?`)) {
+        const presets = JSON.parse(localStorage.getItem('classroom_presets') || '{}');
+        delete presets[name];
+        localStorage.setItem('classroom_presets', JSON.stringify(presets));
+        loadSavedPresets();
+        initDefaultRoom();
+      }
+    }
+
+    function initDefaultRoom() {
+      furniture = [
+        { id: 1, type: 'whiteboard', label: 'WHITEBOARD / FRONT', x: 200, y: 10, w: 300, h: 20, color: '#334155' },
+        { id: 2, type: 'teacherDesk', label: 'Teacher Desk', x: 20, y: 20, w: 90, h: 55, color: '#94a3b8' },
+        { id: 3, type: 'studentDesk', label: 'Desk 1', x: 120, y: 140, w: 70, h: 45, color: '#cbd5e1' },
+        { id: 4, type: 'studentDesk', label: 'Desk 2', x: 250, y: 140, w: 70, h: 45, color: '#cbd5e1' },
+        { id: 5, type: 'studentDesk', label: 'Desk 3', x: 380, y: 140, w: 70, h: 45, color: '#cbd5e1' },
+        { id: 6, type: 'studentDesk', label: 'Desk 4', x: 510, y: 140, w: 70, h: 45, color: '#cbd5e1' }
+      ];
+      heatPoints = [];
+      updateAnalytics();
+      drawRoom();
+    }
+
+    function addFurniture(type) {
+      const id = Date.now();
+      if (type === 'studentDesk') furniture.push({ id, type, label: 'Desk', x: 50, y: 50, w: 70, h: 45, color: '#cbd5e1' });
+      if (type === 'teacherDesk') furniture.push({ id, type, label: 'Teacher Desk', x: 50, y: 50, w: 90, h: 55, color: '#94a3b8' });
+      if (type === 'whiteboard') furniture.push({ id, type, label: 'WHITEBOARD', x: 200, y: 10, w: 300, h: 20, color: '#334155' });
+      drawRoom();
+    }
+
+    function drawRoom() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw Quadrant Grid Guidelines
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, canvas.height / 2); ctx.lineTo(canvas.width, canvas.height / 2); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Quadrant Labels
+      ctx.fillStyle = '#94a3b8'; ctx.font = '11px system-ui';
+      ctx.fillText('FRONT-LEFT', 10, 20); ctx.fillText('FRONT-RIGHT', canvas.width - 80, 20);
+      ctx.fillText('BACK-LEFT', 10, canvas.height - 10); ctx.fillText('BACK-RIGHT', canvas.width - 80, canvas.height - 10);
+
+      // Draw Furniture
+      furniture.forEach(item => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+        ctx.fillStyle = item.type === 'whiteboard' ? '#ffffff' : '#0f172a';
+        ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(item.label, item.x + item.w / 2, item.y + item.h / 2);
+      });
+
+      // Draw Radial Heatmap Overlays
+      heatPoints.forEach(p => {
+        let grad = ctx.createRadialGradient(p.x, p.y, 5, p.x, p.y, 45);
+        grad.addColorStop(0, 'rgba(239, 68, 68, 0.7)');
+        grad.addColorStop(0.5, 'rgba(245, 158, 11, 0.35)');
+        grad.addColorStop(1, 'rgba(239, 68, 68, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 45, 0, Math.PI * 2); ctx.fill();
+      });
+    }
+
+    function updateAnalytics() {
+      if (heatPoints.length === 0) {
+        document.getElementById('stat-fl').innerText = '0%';
+        document.getElementById('stat-fr').innerText = '0%';
+        document.getElementById('stat-bl').innerText = '0%';
+        document.getElementById('stat-br').innerText = '0%';
+        return;
+      }
+
+      let midX = canvas.width / 2, midY = canvas.height / 2;
+      let fl = 0, fr = 0, bl = 0, br = 0;
+
+      heatPoints.forEach(p => {
+        if (p.x < midX && p.y < midY) fl++;
+        else if (p.x >= midX && p.y < midY) fr++;
+        else if (p.x < midX && p.y >= midY) bl++;
+        else br++;
+      });
+
+      let total = heatPoints.length;
+      document.getElementById('stat-fl').innerText = Math.round((fl / total) * 100) + '%';
+      document.getElementById('stat-fr').innerText = Math.round((fr / total) * 100) + '%';
+      document.getElementById('stat-bl').innerText = Math.round((bl / total) * 100) + '%';
+      document.getElementById('stat-br').innerText = Math.round((br / total) * 100) + '%';
+    }
+
+    function getCanvasCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return {
+        x: (clientX - rect.left) * (canvas.width / rect.width),
+        y: (clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      const { x, y } = getCanvasCoords(e);
+      if (mode === 'design') {
+        selectedElement = [...furniture].reverse().find(i => x >= i.x && x <= i.x + i.w && y >= i.y && y <= i.y + i.h);
+        if (selectedElement) { isDragging = true; dragOffsetX = x - selectedElement.x; dragOffsetY = y - selectedElement.y; }
+      } else {
+        heatPoints.push({ x, y, timestamp: new Date().toISOString() });
+        document.getElementById('prompt-banner').style.display = 'none';
+        updateAnalytics();
+        drawRoom();
+      }
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (mode === 'design' && isDragging && selectedElement) {
+        const { x, y } = getCanvasCoords(e);
+        selectedElement.x = Math.max(0, Math.min(canvas.width - selectedElement.w, x - dragOffsetX));
+        selectedElement.y = Math.max(0, Math.min(canvas.height - selectedElement.h, y - dragOffsetY));
+        drawRoom();
+      }
+    });
+    window.addEventListener('pointerup', () => { isDragging = false; });
+
+    function lockLayout() {
+      mode = 'track';
+      document.getElementById('design-toolbar').style.display = 'none';
+      document.getElementById('tracker-panel').style.display = 'block';
+      drawRoom();
+    }
+
+    function unlockLayout() {
+      mode = 'design';
+      document.getElementById('design-toolbar').style.display = 'flex';
+      document.getElementById('tracker-panel').style.display = 'none';
+      drawRoom();
+    }
+
+    function startSession() {
+      if (sessionActive) return;
+      sessionActive = true;
+      document.getElementById('start-btn').disabled = true;
+      timerInterval = setInterval(() => {
+        totalSeconds--;
+        let mins = Math.floor(totalSeconds / 60), secs = totalSeconds % 60;
+        document.getElementById('timer-box').innerText = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        if (totalSeconds % 60 === 0 && totalSeconds > 0) {
+          document.getElementById('prompt-banner').style.display = 'block';
+          if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        }
+        if (totalSeconds <= 0) { clearInterval(timerInterval); alert('Session Complete!'); }
+      }, 1000);
+    }
+
+    function exportHeatmapImage() {
+      const link = document.createElement('a');
+      link.download = `Heatmap_${document.getElementById('roomSelect').value}_${new Date().toISOString().slice(0,10)}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+
+    function exportCSVData() {
+      let csv = "Timestamp,CanvasX,CanvasY\n";
+      heatPoints.forEach(p => { csv += `"${p.timestamp}",${p.x},${p.y}\n`; });
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const link = document.createElement('a');
+      link.download = `ProximityData_${new Date().toISOString().slice(0,10)}.csv`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+    }
+
+    function sendToGoogleSheets() {
+      if (!GOOGLE_SHEET_WEBHOOK_URL) {
+        GOOGLE_SHEET_WEBHOOK_URL = prompt("Paste your Google Apps Script Web App URL:");
+        if (!GOOGLE_SHEET_WEBHOOK_URL) return;
+        localStorage.setItem('google_sheet_url', GOOGLE_SHEET_WEBHOOK_URL);
+      }
+
+      const payload = {
+        date: new Date().toLocaleDateString(),
+        room: document.getElementById('roomSelect').value,
+        totalTaps: heatPoints.length,
+        frontLeft: document.getElementById('stat-fl').innerText,
+        frontRight: document.getElementById('stat-fr').innerText,
+        backLeft: document.getElementById('stat-bl').innerText,
+        backRight: document.getElementById('stat-br').innerText
+      };
+
+      fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(() => alert("Data sent to Google Sheet!"))
+        .catch(err => alert("Error syncing data: " + err));
+    }
+
+    loadSavedPresets();
+    initDefaultRoom();
+  </script>
+</body>
+</html>
